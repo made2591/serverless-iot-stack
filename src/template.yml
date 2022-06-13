@@ -1,0 +1,399 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: A AWS serverless IoT stack deployed using Serverless Application Model (SAM)
+
+Parameters:
+  MonitoringTopic:
+    Type: String
+    Default: monitoring-device/building-1
+    Description: Monitoring MQTT topic to receive data from devices
+  RemediationTopic:
+    Type: String
+    Default: monitoring-device/remediation-1
+    Description: Remediation MQTT topic to send data (remediation logic) from the cloud
+  ReadCapacity:
+    Type: Number
+    Default: 1
+    Description: Provisioned Read Capacity Unit for DynamoDB Table
+  WriteCapacity:
+    Type: Number
+    Default: 1
+    Description: Provisioned Write Capacity Unit for DynamoDB Table
+  HistoryBucket:
+    Type: String
+    Default: stuff.made2591
+    Description: Bucket to save history changes
+  IoTCoreEndpoint:
+    Type: String
+    Default: a3as4jecz5xh6d-ats.iot.eu-west-1.amazonaws.com
+    Description: IoT Core broker endpoint managed by AWS
+  DeviceID:
+    Type: Number
+    Default: 930129302
+    Description: IoT Core device (for debugging, let you analize clean dashboard)
+
+Globals:
+  Function:
+    Timeout: 10
+    # Architectures:
+    # - arm64
+    Environment:
+      Variables:
+        REGION: !Ref "AWS::Region"
+        IOT_CORE_ENDPOINT: !Ref IoTCoreEndpoint
+
+Resources:
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: worker/
+      Handler: worker
+      Runtime: go1.x
+      Tracing: Active
+      Environment:
+        Variables:
+          HISTORY_BUCKET: !Ref HistoryBucket
+          MONITORING_TABLE: !Ref MonitoringTable
+          DEVICE_ID: !Ref DeviceID
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MonitoringTable
+        - S3CrudPolicy:
+            BucketName: !Ref HistoryBucket
+        - arn:aws:iam::aws:policy/AWSIoTFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+      Events:
+        IoT:
+          Type: IoTRule
+          Properties:
+            Sql: !Join ["", ["SELECT * FROM '", !Ref MonitoringTopic, "'"]]
+            AwsIotSqlVersion: "2016-03-23"
+
+  MonitoringTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: digest
+          AttributeType: S
+      KeySchema:
+        - AttributeName: digest
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: !Ref ReadCapacity
+        WriteCapacityUnits: !Ref WriteCapacity
+      SSESpecification:
+        SSEEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: "ttl"
+
+  RemediationLogicTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: digest
+          AttributeType: S
+      KeySchema:
+        - AttributeName: digest
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: !Ref ReadCapacity
+        WriteCapacityUnits: !Ref WriteCapacity
+      SSESpecification:
+        SSEEnabled: true
+
+  RemediationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: remediation/
+      Handler: remediation
+      Runtime: go1.x
+      Tracing: Active
+      Environment:
+        Variables:
+          REMEDIATION_TABLE: !Ref RemediationLogicTable
+          REMEDIATION_TOPIC: !Ref RemediationTopic
+          REMEDIATION_LOGIC: "false"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RemediationLogicTable
+        - arn:aws:iam::aws:policy/AWSIoTFullAccess
+      Events:
+        Stream:
+          Type: DynamoDB
+          Properties:
+            Enabled: true
+            BatchSize: 100
+            StartingPosition: TRIM_HORIZON
+            Stream: !GetAtt MonitoringTable.StreamArn
+
+  MonitoringDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties: 
+      DashboardBody: !Sub
+        - |
+          {
+              "widgets": [
+                  {
+                      "height": 6,
+                      "width": 12,
+                      "y": 0,
+                      "x": 0,
+                      "type": "metric",
+                      "properties": {
+                          "metrics": [
+                              [ "Device/Monitoring", "Temperature", "Device", "${Device}", { "id": "m1", "label": "TEMPERATURE IN ENVIRONMENT IN C°", "color": "#2ca02c" } ]
+                          ],
+                          "view": "timeSeries",
+                          "stacked": false,
+                          "region": "eu-west-1",
+                          "period": 1,
+                          "stat": "Average",
+                          "title": "TEMPERATURE IN ENVIRONMENT IN C°",
+                          "setPeriodToTimeRange": true,
+                          "yAxis": {
+                              "left": {
+                                  "label": "TEMPERATURE IN C°",
+                                  "showUnits": false
+                              },
+                              "right": {
+                                  "label": "TEMPERATURE IN C°",
+                                  "showUnits": false
+                              }
+                          },
+                          "liveData": true
+                      }
+                  },
+                  {
+                      "height": 6,
+                      "width": 12,
+                      "y": 0,
+                      "x": 12,
+                      "type": "metric",
+                      "properties": {
+                          "metrics": [
+                              [ "Device/Monitoring", "Humidity", "Device", "${Device}", { "label": "RELATIVE HUMIDITY IN ENVIRONMENT (%)" } ]
+                          ],
+                          "view": "timeSeries",
+                          "stacked": false,
+                          "region": "eu-west-1",
+                          "period": 1,
+                          "stat": "Average",
+                          "title": "RELATIVE HUMIDITY IN ENVIRONMENT (%)",
+                          "yAxis": {
+                              "left": {
+                                  "label": "RELATIVE HUMIDITY IN ENVIRONMENT (%)",
+                                  "showUnits": false
+                              },
+                              "right": {
+                                  "label": "RELATIVE HUMIDITY IN ENVIRONMENT (%)",
+                                  "showUnits": false
+                              }
+                          },
+                          "liveData": true
+                      }
+                  },
+                  {
+                      "type": "metric",
+                      "x": 0,
+                      "y": 6,
+                      "width": 2,
+                      "height": 5,
+                      "properties": {
+                          "metrics": [
+                              [ "Device/Monitoring", "Temperature", "Device", "${Device}", { "color": "#2ca02c" } ]
+                          ],
+                          "sparkline": true,
+                          "view": "singleValue",
+                          "region": "eu-west-1",
+                          "period": 1,
+                          "setPeriodToTimeRange": true,
+                          "liveData": true,
+                          "singleValueFullPrecision": false,
+                          "stacked": false,
+                          "stat": "Average"
+                      }
+                  },
+                  {
+                      "type": "metric",
+                      "x": 12,
+                      "y": 6,
+                      "width": 2,
+                      "height": 5,
+                      "properties": {
+                          "metrics": [
+                              [ "Device/Monitoring", "Humidity", "Device", "${Device}" ]
+                          ],
+                          "sparkline": true,
+                          "view": "singleValue",
+                          "region": "eu-west-1",
+                          "period": 1,
+                          "setPeriodToTimeRange": true,
+                          "liveData": true,
+                          "singleValueFullPrecision": false,
+                          "stacked": false,
+                          "stat": "Average"
+                      }
+                  },
+                  {
+                      "type": "metric",
+                      "x": 2,
+                      "y": 6,
+                      "width": 10,
+                      "height": 5,
+                      "properties": {
+                          "metrics": [
+                              [ "Device/Monitoring", "Temperature", "Device", "${Device}" ],
+                              [ "...", { "stat": "Maximum" } ]
+                          ],
+                          "view": "singleValue",
+                          "region": "eu-west-1",
+                          "period": 300,
+                          "stat": "Minimum",
+                          "setPeriodToTimeRange": false,
+                          "sparkline": true,
+                          "liveData": true,
+                          "yAxis": {
+                              "left": {
+                                  "min": 25,
+                                  "max": 30
+                              }
+                          }
+                      }
+                  },
+                  {
+                      "type": "metric",
+                      "x": 14,
+                      "y": 6,
+                      "width": 10,
+                      "height": 5,
+                      "properties": {
+                          "metrics": [
+                              [ "Device/Monitoring", "Humidity", "Device", "${Device}" ],
+                              [ "...", { "stat": "Maximum" } ]
+                          ],
+                          "view": "singleValue",
+                          "region": "eu-west-1",
+                          "period": 300,
+                          "stat": "Minimum",
+                          "setPeriodToTimeRange": false,
+                          "sparkline": true,
+                          "liveData": true,
+                          "yAxis": {
+                              "left": {
+                                  "min": 25,
+                                  "max": 30
+                              }
+                          }
+                      }
+                  }
+              ]
+          }
+        - Device: !Ref DeviceID
+      DashboardName: !Join ["-", ["dashboard", !Ref DeviceID]]
+
+  MonitoringAlarmMinimum:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ["-", ["minimum-temperature-", !Ref DeviceID]]
+      AlarmDescription: Temperature
+      ActionsEnabled: true
+      OKActions:
+        - arn:aws:sns:eu-west-1:015708668291:monitoring-temperature-alarm-930129302
+      AlarmActions:
+        - arn:aws:sns:eu-west-1:015708668291:monitoring-temperature-alarm-930129302
+      InsufficientDataActions: []
+      MetricName: Temperature
+      Namespace: Device/Monitoring
+      Statistic: Minimum
+      Dimensions:
+        - Name: Device
+          Value: "930129302"
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 26
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: ignore
+
+  MonitoringAlarmMaximum:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ["-", ["maximum-temperature-", !Ref DeviceID]]
+      AlarmDescription: Temperature
+      ActionsEnabled: true
+      OKActions:
+        - arn:aws:sns:eu-west-1:015708668291:monitoring-temperature-alarm-930129302
+      AlarmActions:
+        - arn:aws:sns:eu-west-1:015708668291:monitoring-temperature-alarm-930129302
+      InsufficientDataActions: []
+      MetricName: Temperature
+      Namespace: Device/Monitoring
+      Statistic: Maximum
+      Dimensions:
+        - Name: Device
+          Value: "930129302"
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 28
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: ignore
+
+  MonitoringAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ["-", ["avg-temperature-", !Ref DeviceID]]
+      AlarmDescription: !Join [" ", ["Alarm for device", !Ref DeviceID, "out of threashold"]]
+      OKActions:
+        - arn:aws:sns:eu-west-1:015708668291:monitoring-temperature-alarm-930129302
+      AlarmActions:
+        - !Ref MonitoringNotificationTopic
+      ComparisonOperator: LessThanLowerOrGreaterThanUpperThreshold
+      InsufficientDataActions: []
+      Dimensions: []
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      ComparisonOperator: LessThanLowerOrGreaterThanUpperThreshold
+      TreatMissingData: ignore
+      Metrics:
+        - Id: m1
+          ReturnData: true
+          MetricStat:
+            Metric:
+              Namespace: Device/Monitoring
+              MetricName: Temperature
+              Dimensions:
+              - Name: Device
+                Value: "930129302"
+            Period: 60
+            Stat: Minimum
+        - Id: ad1
+          Label: Temperature (expected)
+          ReturnData: true
+          Expression: ANOMALY_DETECTION_BAND(m1, 1)
+      ThresholdMetricId: ad1
+
+  MonitoringNotificationTopic:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      Subscription:
+        - Endpoint: "matteo.madeddu@gmail.com"
+          Protocol: "email"
+      TopicName: !Join ["-", ["monitoring-temperature-alarm", !Ref DeviceID]]
+
+Outputs:
+  WorkerFunction:
+    Description: "Worker Lambda Function ARN"
+    Value: !GetAtt WorkerFunction.Arn
+  RemediationFunction:
+    Description: "Worker Lambda Function ARN"
+    Value: !GetAtt RemediationFunction.Arn
+  MonitoringTable:
+    Description: "Message Table Name"
+    Value: !Ref MonitoringTable
+  RemediationLogicTable:
+    Description: "Remediation Logic Table Name"
+    Value: !Ref RemediationLogicTable
