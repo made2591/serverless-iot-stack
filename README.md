@@ -1,6 +1,8 @@
 ## Serverless-iot-stack <!-- omit in toc -->
 
-A AWS serverless IoT stack deployed using Serverless Application Model (SAM)
+A AWS serverless IoT stack deployed using Serverless Application Model (SAM).
+
+This architecture was presented at the [AWS Summit 2022](https://aws.amazon.com/it/events/summits/milano/agenda/) in Milan (July 22) at the AWSome Stories Theater. A PDF version of the slide are available at [madeddu.xyz/aws_summit_2022.pdf](https://madeddu.xyz/aws_summit_2022.pdf)
 
 ## Contents
 - [Contents](#contents)
